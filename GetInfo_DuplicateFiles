@@ -1,0 +1,28 @@
+
+# Define the path to scan for duplicate files
+$directoryToScan = "C:\Users\a835062\OneDrive - ATOS"
+
+# Get all files recursively in the specified directory
+$files = Get-ChildItem -Path $directoryToScan -File -Recurse
+
+# Group files by their name and size
+$groupedFiles = $files | Group-Object Name, Length
+
+# Find duplicate files
+$duplicateFiles = $groupedFiles | Where-Object { $_.Count -gt 1 }
+
+$totalDuplicateSize = 0
+
+if ($duplicateFiles.Count -gt 0) {
+    foreach ($group in $duplicateFiles) {
+        # Add the size of all files in the group except the first one (since it's the original, not a duplicate)
+        $totalDuplicateSize += ($group.Group | Select-Object -Skip 1 | Measure-Object -Property Length -Sum).Sum
+    }
+
+    # Format output using Format-Table and display it
+    $output | Format-Table -Property Name, ModifiedDate, Size, FullPath -AutoSize
+    Write-Host "---------------------------"
+    Write-Host ("Total size of duplicate files: {0:N2} MB" -f ($totalDuplicateSize / 1MB))
+} else {
+    Write-Host "No duplicate files found in the specified directory."
+}
