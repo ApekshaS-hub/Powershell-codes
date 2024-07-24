@@ -1,0 +1,31 @@
+# Define the path to the Downloads folder
+#$DownloadsFolder = "C:\Users\a835062\Downloads"
+$DownloadsFolder = "$env:userprofile\Downloads"
+
+
+<## Retrieve and sort files, then select the top 10 largest
+$TopFiles = Get-ChildItem -Path $DownloadsFolder -File -Recurse | 
+    Sort-Object -Property Length -Descending | 
+    Select-Object -First 10#>
+
+
+# Retrieve and sort all files by size in descending order
+$AllFiles = Get-ChildItem -Path $DownloadsFolder -File -Recurse | 
+    Sort-Object -Property Length -Descending
+
+# Create a custom object array to store the results
+$FileList = @()
+
+# Populate the custom object array with file details
+foreach ($file in $AllFiles) {
+    $FileDetails = [PSCustomObject]@{
+        Name = $file.Name
+        SizeMB = [Math]::Round(($file.Length / 1MB), 2)
+        FullPath = $file.FullName
+        ModifiedDate = $file.LastWriteTime.ToString("yyyy-MM-dd")
+    }
+    $FileList += $FileDetails
+}
+
+# Output the results as a formatted table
+$FileList | Format-Table -Property Name, ModifiedDate, SizeMB, FullPath -AutoSize | Out-String -Width 4096
