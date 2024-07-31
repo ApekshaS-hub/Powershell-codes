@@ -1,25 +1,13 @@
-# Function to check antivirus status
 function Check-AntivirusStatus {
-    # Use Get-CimInstance to query the Security Center for antivirus products
     $antivirusProducts = Get-CimInstance -Namespace "root/SecurityCenter2" -ClassName "AntiVirusProduct" -ErrorAction SilentlyContinue
-
     if ($antivirusProducts) {
-        Write-Output "Antivirus product(s) found:"
-        foreach ($product in $antivirusProducts) {
-            $productName = $product.displayName
-            $productEnabled = $product.productState -band 1
-
-            Write-Output "Product Name: $productName"
-            if ($productEnabled) {
-                Write-Output "Status: Enabled"
-            } else {
-                Write-Output "Status: Disabled"
-            }
+        $antivirusProducts | ForEach-Object {
+            $status = if ($_.productState -band 1) { "Enabled" } else { "Disabled" }
+            Write-Output "Product Name: $($_.displayName)`nStatus: $status"
         }
     } else {
         Write-Output "No antivirus product found."
     }
 }
 
-# Run the function to check the antivirus status
 Check-AntivirusStatus
