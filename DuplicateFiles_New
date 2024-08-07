@@ -1,0 +1,41 @@
+New-Variable -Name 'DIRECTORY_TO_SCAN' `
+    -Value "$env:USERPROFILE\OneDrive - ATOS" `
+    -Option ReadOnly -Scope Script -Force
+
+function Find-DuplicateFiles {
+    param (
+        [string]$directoryToScan = $DIRECTORY_TO_SCAN
+    )
+
+    $items = Get-ChildItem -Path $DIRECTORY_TO_SCAN -Recurse
+
+    $files = $items | Where-Object { -not $_.PSIsContainer }
+
+    $groupedFiles = $files | Group-Object Name, Length
+
+    # Find duplicate files
+    $duplicateFiles = $groupedFiles | Where-Object { $_.Count -gt 1 }
+
+    $totalDuplicateSize = 0
+
+    if ($duplicateFiles.Count -gt 0) {
+        foreach ($group in $duplicateFiles) {
+            # Add the size of all files in the group except the first one (since it's the original, not a duplicate)
+            $totalDuplicateSize += ($group.Group | Select-Object -Skip 1 | Measure-Object -Property Length -Sum).Sum
+        }
+
+        $output = $duplicateFiles | ForEach-Object {
+            $_.Group | Select-Object Name, @{Name="ModifiedDate";Expression={$_.LastWriteTime.ToString("yyyy-MM-dd")}}, @{Name="SizeMB";Expression={[math]::Round($_.Length / 1MB, 2)}}, @{Name='FullPath';Expression={$_.FullName}}
+        }
+
+        $output | Format-Table -Property Name, ModifiedDate, SizeMB, FullPath -AutoSize
+        Write-Host ("DuplicateFiles successfully displayed with totalDuplicateSize")
+        
+        Write-Host ("Total size of duplicate files: {0:N2} MB" -f ($totalDuplicateSize / 1MB))
+    } else {
+        Write-Host "No duplicate files found in the specified directory."
+    }
+}
+
+# Call the function
+Find-DuplicateFiles
