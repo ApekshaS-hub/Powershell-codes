@@ -1,0 +1,338 @@
+<#
+.SYNOPSIS
+Collects information from various features of PC Manager.
+
+.DESCRIPTION
+This RA collects information from various features of PC Manager, such as antivirus, deep cleanup, light cleanup, duplicate files, downloaded files, large files, Windows Update, and uninstalled applications, and displays the output accordingly.
+
+.INPUTS
+
+.FUNCTIONALITY
+GetInfo
+
+
+.NOTES
+Provider: 			Apeksha Shinde
+Context:            Local System
+Version:            1.0 - Initial release 
+Last Generated:     
+#>
+
+#
+# Constants definition
+#
+
+$env:Path = 'C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\'
+
+New-Variable -Name 'ERROR_EXCEPTION_TYPE' `
+    -Value @{Environment = '[Environment error]'
+             Input = '[Input error]'
+             Internal = '[Internal error]'} 
+			 
+New-Variable -Name 'LOCAL_SYSTEM_IDENTITY' `
+    -Value 'S-1-5-18' -Option ReadOnly -Scope Script
+	
+New-Variable -Name 'REMOTE_ACTION_DLL_PATH' `
+    -Value "$env:NEXTHINK\RemoteActions\nxtremoteactions.dll" `
+    -Option ReadOnly -Scope Script
+	
+New-Variable -Name 'NAMESPACE' `
+    -Value 'root/SecurityCenter2' `
+    -Option ReadOnly -Scope Script -Force
+	
+New-Variable -Name 'PATHS' `
+    -Value @{'Windows_Update_Cleanup' = 'C:\Windows\SoftwareDistribution\DataStore\Logs'
+             'Windows_Error_Reports_and_Feedback_Diagnostics' = 'C:\ProgramData\Microsoft\Windows\WER\ReportArchive'
+             'Microsoft_Defender_Logs_and_Scan_History_Files' = 'C:\ProgramData\Microsoft\Windows Defender\Support'
+             'Temporary_Files' = [System.IO.Path]::GetTempPath()} `
+    -Option ReadOnly -Scope Script -Force
+
+New-Variable -Name 'ROOTS' `
+	-Value @("$env:USERPROFILE\Downloads", "$env:USERPROFILE\Downloads") `
+	-Option ReadOnly -Scope Script -Force
+	
+New-Variable -Name 'TYPES' `
+	-Value @("*.mp3", "*.mp4", "*.avi", "*.mkv", "*.jpg", "*.jpeg", "*.png", "*.gif", "*.pdf", "*.docx", "*.xlsx") `
+	-Option ReadOnly -Scope Script -Force
+	
+New-Variable -Name 'DIRECTORY_TO_SCAN' `
+    -Value "$env:USERPROFILE\OneDrive - ATOS" `
+    -Option ReadOnly -Scope Script -Force	
+	
+New-Variable -Name 'LargeFilePath' `
+    -Value "$env:USERPROFILE\OneDrive - ATOS" `
+    -Option ReadOnly -Scope Script -Force
+
+	
+#
+# Invoke Main
+#
+function Invoke-Main([hashtable]$InputParameters) {
+    $exitCode = 0
+    
+    try {
+        Add-NexthinkRemoteActionDLL
+        Test-RunningAsLocalSystem
+		Check-AntivirusStatus
+		Start-Sleep -Seconds 5
+		Get-DeepCleanUpSize
+		Start-Sleep -Seconds 5
+		Get-DownloadedFiles
+		Start-Sleep -Seconds 5
+		Get-DuplicateFiles
+		Start-Sleep -Seconds 5
+		Get-LargeFiles
+		Start-Sleep -Seconds 5
+		Get-LightCleenUp
+		Start-Sleep -Seconds 5
+		Get-UniqueAppPackages
+		       
+    } catch {
+        Write-StatusMessage -Message $_
+        $exitCode = 1
+    }
+
+    return $exitCode
+}
+#
+
+function Add-NexthinkRemoteActionDLL {
+    if (-not (Test-Path -Path $REMOTE_ACTION_DLL_PATH)) {
+		throw "$($ERROR_EXCEPTION_TYPE.Environment) Nexthink Remote Action DLL not found."
+}
+    Add-Type -Path $REMOTE_ACTION_DLL_PATH
+}
+
+function Test-RunningAsLocalSystem {
+    $currentIdentity = Get-CurrentIdentity
+    if ($currentIdentity -ne $LOCAL_SYSTEM_IDENTITY) {
+        throw "$($ERROR_EXCEPTION_TYPE.Environment) This script must be run as Local system mode. "
+    }
+}
+
+function Get-CurrentIdentity {
+    return [security.principal.windowsidentity]::GetCurrent().User.ToString()
+}
+
+function Write-StatusMessage ([psobject]$Message) {
+    $exception = $Message.ToString()
+
+    if ($Message.InvocationInfo.ScriptLineNumber) {
+        $version = Get-ScriptVersion
+        if(-not [string]::IsNullOrEmpty($version)) {
+            $version = "Version: $version. "
+        }
+
+        $errorMessage = $version + "Line '$($Message.InvocationInfo.ScriptLineNumber)'. "
+    }
+
+    $host.ui.WriteErrorLine($errorMessage + $exception)
+}
+
+function Get-ScriptVersion {
+    $scriptContent = Get-Content $MyInvocation.ScriptName | Out-String
+    if ($scriptContent -notmatch '<#[\r\n]{2}.SYNOPSIS[^\#\>]*(.NOTES[^\#\>]*)\#>') { return }
+
+    $helpBlock = $Matches[1].Split([environment]::NewLine)
+
+    foreach ($line in $helpBlock) {
+        if ($line -match 'Version:') {
+            return $line.Split(':')[1].Split('-')[0].Trim()
+        }
+    }
+}
+
+
+#PC Manager Features
+#Function Defination of Check-AntivirusStatus
+function Check-AntivirusStatus {
+    $antivirusProducts = Get-CimInstance -Namespace $NAMESPACE -ClassName "AntiVirusProduct" -ErrorAction SilentlyContinue
+    if ($antivirusProducts) {
+        $antivirusProducts | ForEach-Object {
+            $status = if ($_.productState -band 1) { "Enabled" } else { "Disabled" }
+            [Nxt]::WriteOutputString("Antivirus Product Name:", [string]$($_.displayName))
+			[Nxt]::WriteOutputString("Antivirus Status:", [string]$status)
+        }
+    } else {
+		[Nxt]::WriteOutputString("No antivirus product found")
+    }
+	[Nxt]::WriteOutputString("Antivirus status checked successfully")
+}
+
+#Function Defination of Get-DeepCleanUpSize
+function Get-DeepCleanUpSize {
+    $Path = $PATHS
+    $totaldeepSize = 0
+
+    foreach ($name in $Path.Keys) {
+        if (-Not (Test-Path -Path $Path[$name])) {
+            [Nxt]::WriteOutputString("Path $($Paths[$name]) does not exist")
+            continue
+        }
+
+        try {
+            $files = Get-ChildItem -Path $Path[$name] -Recurse -File -ErrorAction Stop
+            $size = ($files | Measure-Object -Property Length -Sum).Sum / 1MB
+            $size = [math]::Round($size, 2)
+        }
+        catch {
+			[Nxt]::WriteOutputString("Failed to get size for path $($Paths[$name]). Error: $_")
+            $size = 0
+        }
+		
+		[Nxt]::WriteOutputSize("Total size of ${name}: ${size} MB")
+        $totaldeepSize += $size
+    }
+	[Nxt]::WriteOutputSize("Total size of all specified directories : ${totaldeepSize} MB")
+	[Nxt]::WriteOutputString("DeepCleanUpSize successfully displayed")
+}
+
+#Function Defination of Get-DownloadedFiles
+function Get-DownloadedFiles {
+    param (
+        [array]$root = $ROOTS,
+        [array]$Type = $TYPES
+    )
+    $files = @()
+    foreach ($path in $ROOTS) {
+        foreach ($type in $TYPES) {
+            $files += Get-ChildItem -Path $path -Recurse -File -Include $TYPES -ErrorAction SilentlyContinue
+        }
+    }
+
+    $uniqueFiles = $files | Group-Object -Property FullName | ForEach-Object { $_.Group[0] }
+    $sortedFiles = $uniqueFiles | Sort-Object -Property Length -Descending
+    $totalDownloadedFilesSize = [math]::Round(($sortedFiles | Measure-Object -Property Length -Sum).Sum / 1MB, 2)
+
+    $sortedFiles | Select-Object Name, @{Name="ModifiedDate";Expression={$_.LastWriteTime.ToString("yyyy-MM-dd")}}, @{Name="SizeMB";Expression={[math]::Round($_.Length / 1MB, 2)}}, FullName | Format-Table -AutoSize
+    [Nxt]::WriteOutputSize("Total Size of Downloaded Files: ${totalDownloadedFilesSize} MB")
+	[Nxt]::WriteOutputString("DownloadedFiles successfully displayed with totalFilesSize")
+}
+
+#Function Defination of Find-DuplicateFiles
+function Get-DuplicateFiles {
+    param (
+        [string]$directoryToScan = $DIRECTORY_TO_SCAN
+    )
+
+    $items = Get-ChildItem -Path $DIRECTORY_TO_SCAN -Recurse
+    $files = $items | Where-Object { -not $_.PSIsContainer }
+	
+    $groupedFiles = $files | Group-Object Name, Length
+    $duplicateFiles = $groupedFiles | Where-Object { $_.Count -gt 1 }
+
+    $totalDuplicateSize = 0
+
+    if ($duplicateFiles.Count -gt 0) {
+        foreach ($group in $duplicateFiles) {
+            $totalDuplicateSize += ($group.Group | Select-Object -Skip 1 | Measure-Object -Property Length -Sum).Sum
+        }
+
+        $output = $duplicateFiles | ForEach-Object {
+            $_.Group | Select-Object Name, @{Name="ModifiedDate";Expression={$_.LastWriteTime.ToString("yyyy-MM-dd")}}, @{Name="SizeMB";Expression={[math]::Round($_.Length / 1MB, 2)}}, @{Name='FullPath';Expression={$_.FullName}}
+        }
+
+        $output | Format-Table -Property Name, ModifiedDate, SizeMB, FullPath -AutoSize
+        [Nxt]::WriteOutputString("DuplicateFiles successfully displayed")
+        [Nxt]::WriteOutputSize("Total size of duplicate files: {0:N2} MB" -f ($totalDuplicateSize / 1MB))
+    } else {
+        [Nxt]::WriteOutputString("No duplicate files found in the specified directory")
+    }
+}
+
+#Function Defination of Get-LargeFiles
+function Get-LargeFiles {
+    param (
+        [string]$Path = $LargeFilePath,          
+        [int]$ThresholdMB = 10          
+    )
+    
+    try {
+        Get-ChildItem -Path $Path -Recurse -File -ErrorAction Stop | Where-Object { $_.Length -gt ($ThresholdMB * 1MB) } |
+        Select-Object Name, @{Name="ModifiedDate";Expression={$_.LastWriteTime.ToString("yyyy-MM-dd")}}, @{Name="SizeMB";Expression={[math]::round($_.Length / 1MB, 2)}}, FullName |
+        Sort-Object -Property Length -Descending |
+        Format-Table -AutoSize
+		[Nxt]::WriteOutputString("LargeFiles successfully displayed")
+    } catch {
+        [Nxt]::WriteOutputString("Skipping directory: $Path due to access denied")
+    }
+}
+
+#Function Defination of Get-LightCleenUpSize(TemporaryFiles and RecycleBin)
+function Get-LightCleenUp {
+    $TempFolder = [System.IO.Path]::GetTempPath() 
+    $TempFiles = Get-ChildItem -Path $TempFolder -Recurse -File
+    $TotalTempSize = ($TempFiles | Measure-Object -Property Length -Sum).Sum / 1MB
+
+    $RecycleBin = New-Object -ComObject Shell.Application 
+    $RecycleBinItems = $RecycleBin.Namespace(0xA).Items()
+    $TotalRecycleBinSize = 0
+    foreach ($item in $RecycleBinItems) {
+        $TotalRecycleBinSize += $item.Size
+    }
+    $TotalRecycleBinSize = $TotalRecycleBinSize / 1MB
+
+    $TotalTempSizeRounded = [math]::Round($TotalTempSize, 2)
+    $TotalRecycleBinSizeRounded = [math]::Round($TotalRecycleBinSize, 2)
+
+    $LightTotalSize = $TotalTempSizeRounded + $TotalRecycleBinSizeRounded
+
+    [Nxt]::WriteOutputSize("Total size of temporary files: ${TotalTempSizeRounded} MB")
+    [Nxt]::WriteOutputSize("Total size of Recycle Bin: ${TotalRecycleBinSizeRounded} MB")
+    [Nxt]::WriteOutputSize("Total LightCleenUpsize: ${LightTotalSize} MB")
+    [Nxt]::WriteOutputString("LightCleenUpsize successfully displayed")
+}
+
+#Function Defination of Check-WindowsUpdateStatus
+function Check-WindowsUpdateStatus {
+    $installedUpdates = Get-HotFix
+
+    $updateSession = New-Object -ComObject Microsoft.Update.Session
+    $updateSearcher = $updateSession.CreateUpdateSearcher()
+    $searchResult = $updateSearcher.Search("IsInstalled=0")
+
+    if ($searchResult.Updates.Count -eq 0) {
+        [Nxt]::WriteOutputString("Windows is up-to-date.")
+    } else {
+        [Nxt]::WriteOutputString("There are pending updates:")
+        foreach ($update in $searchResult.Updates) {
+            $updateTitle = $update.Title
+            [Nxt]::WriteOutputString(${updateTitle})
+        }
+    }[Nxt]::WriteOutputString("WindowsUpdate Checked successfully")
+}
+
+#Function Defination of Get-UniqueAppPackages
+function Get-UniqueAppPackages {
+    $appPackages = Get-AppxPackage
+
+    $appList = $appPackages | ForEach-Object {
+        $installationType = if ($_.PackageFamilyName -like "Microsoft.*") { "System" } else { "User" }
+
+        [PSCustomObject]@{
+            Name              = $_.Name
+            InstallationType  = $installationType
+        }
+    }
+
+    $uniqueApps = $appList | Group-Object -Property Name | ForEach-Object {
+        [PSCustomObject]@{
+            Name              = $_.Name
+            InstallationType  = $_.Group | Select-Object -First 1 -ExpandProperty InstallationType
+        }
+    }
+
+    $uniqueApps | Format-Table -AutoSize
+    [Nxt]::WriteOutputString("Total number of unique applications: $($uniqueApps.Count)")
+}
+    
+
+
+
+
+
+
+
+
+
+
