@@ -1,0 +1,464 @@
+<#
+.SYNOPSIS
+Collects information from various features of PC Manager.
+
+.DESCRIPTION
+This RA collects information from various features of PC Manager, such as antivirus, deep cleanup, light cleanup, duplicate files, downloaded files, large files, Windows Update, and uninstalled applications, and displays the output accordingly.
+
+.INPUTS
+
+.FUNCTIONALITY
+GetInfo
+
+
+.NOTES
+Provider: 			Apeksha Shinde
+Context:            Local System
+Version:            1.0 - Initial release 
+Last Generated:     
+#>
+
+#
+# Constants definition
+#
+
+$env:Path = 'C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\'
+
+New-Variable -Name 'ERROR_EXCEPTION_TYPE' `
+    -Value @{Environment = '[Environment error]'
+             Input = '[Input error]'
+             Internal = '[Internal error]'} 
+			 
+New-Variable -Name 'LOCAL_SYSTEM_IDENTITY' `
+    -Value 'S-1-5-18' -Option ReadOnly -Scope Script
+	
+New-Variable -Name 'REMOTE_ACTION_DLL_PATH' `
+    -Value "$env:NEXTHINK\RemoteActions\nxtremoteactions.dll" `
+    -Option ReadOnly -Scope Script
+
+New-Variable -Name 'NAMESPACE' `
+    -Value 'root/SecurityCenter2' `
+    -Option ReadOnly -Scope Script -Force
+
+New-Variable -Name 'PATHS' `
+    -Value @{'Windows_Update_Cleanup' = 'C:\Windows\SoftwareDistribution\DataStore\Logs'
+             'Windows_Error_Reports_and_Feedback_Diagnostics' = 'C:\ProgramData\Microsoft\Windows\WER\ReportArchive'
+             'Microsoft_Defender_Logs_and_Scan_History_Files' = 'C:\ProgramData\Microsoft\Windows Defender\Support'
+             'Temporary_Files' = [System.IO.Path]::GetTempPath()} `
+    -Option ReadOnly -Scope Script -Force
+	
+	
+	
+#
+# Invoke Main
+#
+function Invoke-Main {
+    $exitCode = 0
+    
+    try {
+        Add-NexthinkRemoteActionDLL
+        Test-RunningAsLocalSystem
+        Get-DownloadedFiles
+        Check-AntivirusStatus
+        Get-LightCleenUp
+        Check-WindowsUpdateStatus
+        Get-DeepCleanUpSize
+        Get-UniqueAppPackages
+        Get-LargeFiles
+        
+		
+
+				       
+    } catch {
+        Write-StatusMessage -Message $_
+        $exitCode = 1
+    }
+
+    return $exitCode
+}
+#
+
+function Add-NexthinkRemoteActionDLL {
+    if (-not (Test-Path -Path $REMOTE_ACTION_DLL_PATH)) {
+		throw "$($ERROR_EXCEPTION_TYPE.Environment) Nexthink Remote Action DLL not found."
+}
+    Add-Type -Path $REMOTE_ACTION_DLL_PATH
+}
+
+function Test-RunningAsLocalSystem {
+    $currentIdentity = Get-CurrentIdentity
+    if ($currentIdentity -ne $LOCAL_SYSTEM_IDENTITY) {
+        throw "$($ERROR_EXCEPTION_TYPE.Environment) This script must be run as Local system mode. "
+    }
+}
+
+function Get-CurrentIdentity {
+    return [security.principal.windowsidentity]::GetCurrent().User.ToString()
+}
+
+function Write-StatusMessage ([psobject]$Message) {
+    $exception = $Message.ToString()
+
+    if ($Message.InvocationInfo.ScriptLineNumber) {
+        $version = Get-ScriptVersion
+        if(-not [string]::IsNullOrEmpty($version)) {
+            $version = "Version: $version. "
+        }
+
+        $errorMessage = $version + "Line '$($Message.InvocationInfo.ScriptLineNumber)'. "
+    }
+
+    $host.ui.WriteErrorLine($errorMessage + $exception)
+}
+
+function Get-ScriptVersion {
+    $scriptContent = Get-Content $MyInvocation.ScriptName | Out-String
+    if ($scriptContent -notmatch '<#[\r\n]{2}.SYNOPSIS[^\#\>]*(.NOTES[^\#\>]*)\#>') { return }
+
+    $helpBlock = $Matches[1].Split([environment]::NewLine)
+
+    foreach ($line in $helpBlock) {
+        if ($line -match 'Version:') {
+            return $line.Split(':')[1].Split('-')[0].Trim()
+        }
+    }
+}
+
+
+function Get-DownloadedFiles {
+    param (
+        [array]$root = @("$env:USERPROFILE")
+		#[array]$root = @("C:\Users\a929420\Downloads")
+    )
+    
+    $baseDirectory = "$env:temp"
+    $csvFileName = "DownloadedFiles.csv"
+    $downloadFilePath = Join-Path -Path $baseDirectory -ChildPath $csvFileName
+
+    # Ensure the base directory exists
+    if (-not (Test-Path $baseDirectory)) {
+        New-Item -Path $baseDirectory -ItemType Directory -Force
+    }
+
+    # Initialize the array for files
+    $files = @()
+
+    # Check and validate each root path
+    foreach ($path in $root) {
+        $expandedPath = [System.Environment]::ExpandEnvironmentVariables($path)  # Expand environment variables
+        
+        if (-not (Test-Path $expandedPath)) {
+            Write-StatusMessage -Message "Path not found: $expandedPath"
+            continue
+        }
+
+        #Write-StatusMessage -Message "Searching for files in $expandedPath"
+        $files += Get-ChildItem -Path $expandedPath -Recurse -File -ErrorAction SilentlyContinue
+    }
+
+    if ($files.Count -eq 0) {
+        Write-StatusMessage -Message "No files found. Check paths."
+    } else {
+        $count = $files.Count
+        #[Nxt]::WriteOutputString('FoundDownloadedFiles', $count)
+        Write-StatusMessage -Message "FoundDownloadedFiles : $count"
+    }
+
+    # Remove duplicates and sort files
+    $uniqueFiles = $files | Group-Object -Property FullName | ForEach-Object { $_.Group[0] }
+    $sortedFiles = $uniqueFiles | Sort-Object -Property Length -Descending
+    $totalDownloadedFileSize = [math]::Round(($sortedFiles | Measure-Object -Property Length -Sum).Sum / 1MB, 2)
+    $DownloadedFileSize = "$totalDownloadedFileSize MB"
+
+    try {
+        $sortedFiles | Select-Object Name, 
+                                         @{Name="ModifiedDate"; Expression = {$_.LastWriteTime.ToString("yyyy-MM-dd")}}, 
+                                         @{Name="SizeMB"; Expression = {[math]::Round($_.Length / 1MB, 2)}}, 
+                                         FullName | Export-Csv -Path $downloadFilePath -NoTypeInformation
+
+        [Nxt]::WriteOutputString('TotalDownloadedFileSize', $DownloadedFileSize)
+        
+    } catch {
+        Write-StatusMessage -Message "Failed to export CSV: $_"
+    }
+
+    if (Test-Path $downloadFilePath) {
+        $DownloadedList = ""
+        $csvContent = Import-Csv -Path $downloadFilePath | Select-Object -First 5
+        
+        foreach ($line in $csvContent) {
+            $fileName = $line.Name
+            $modifiedDate = $line.ModifiedDate
+            $sizeMB = $line.SizeMB
+            
+            $DownloadedList += $fileName + '|' + $modifiedDate + '|' + $sizeMB + "`r`n"
+			[Nxt]::WriteOutputString('DownloadedFileList', [string]$DownloadedList)
+        }
+
+        Write-StatusMessage -Message 'DownloadedFiles Successfully Exported'
+    } else {
+        Write-StatusMessage -Message "CSV file not found"
+    }
+}
+
+#####################################################################
+
+#Function Defination of Check-AntivirusStatus
+function Check-AntivirusStatus {
+    $antivirusProducts = Get-CimInstance -Namespace $NAMESPACE -ClassName "AntiVirusProduct" -ErrorAction SilentlyContinue
+    if ($antivirusProducts) {
+        $antivirusProducts | ForEach-Object {
+            $status = if ($_.productState -band 1) { "Enabled" } else { "Disabled" }
+            [Nxt]::WriteOutputString('AntivirusProductName',[string]$antivirusProducts.displayName)
+			[nxt]::WriteOutputString('AntivirusStatus',[string]$status)
+        }
+    } else {
+		Write-StatusMessage -Message 'No antivirus product found'
+    }
+	Write-StatusMessage -Message 'Antivirus status checked successfully'
+}
+
+
+function Get-LightCleenUp {
+    $TempFolder = [System.IO.Path]::GetTempPath() 
+    $TempFiles = Get-ChildItem -Path $TempFolder -Recurse -File
+    $TotalTempSize = ($TempFiles | Measure-Object -Property Length -Sum).Sum / 1MB
+
+    $RecycleBin = New-Object -ComObject Shell.Application 
+    $RecycleBinItems = $RecycleBin.Namespace(0xA).Items()
+    $TotalRecycleBinSize = 0
+    foreach ($item in $RecycleBinItems) {
+        $TotalRecycleBinSize += $item.Size
+    }
+
+    # Round off the sizes to 2 decimal places
+    $TotalTempSizeRounded = [math]::Round($TotalTempSize, 2)
+    $TotalRecycleBinSizeRounded = [math]::Round($TotalRecycleBinSize / 1MB, 2)
+
+    # Prepare size strings for output
+    $TempSize = "$TotalTempSizeRounded MB"
+    $RecycleBinSize = "$TotalRecycleBinSizeRounded MB"
+    
+    # Calculate total cleanup size
+    $LightTotalSize = $TotalTempSizeRounded + $TotalRecycleBinSizeRounded
+    $TotalSize = "$LightTotalSize MB"
+
+    # Output the results
+    [Nxt]::WriteOutputString('TotalTemporaryFileSize', $TempSize)
+    [Nxt]::WriteOutputString('TotalRecycleBinSize', $RecycleBinSize)
+    [Nxt]::WriteOutputString('TotalLightCleenUpSize', $TotalSize)
+    Write-StatusMessage -Message 'LightCleenUpsize successfully displayed'
+}
+
+function Check-WindowsUpdateStatus {
+    $installedUpdates = Get-HotFix
+
+    $updateSession = New-Object -ComObject Microsoft.Update.Session
+    $updateSearcher = $updateSession.CreateUpdateSearcher()
+    $searchResult = $updateSearcher.Search("IsInstalled=0")
+
+    if ($searchResult.Updates.Count -eq 0) {
+        Write-StatusMessage -Message 'Windows is up-to-date'
+    } else {
+        Write-StatusMessage -Message 'There are pending updates'
+
+        # Initialize the $updateTitle variable to accumulate titles
+        $updateTitle = ""
+
+        foreach ($update in $searchResult.Updates) {
+            $updateTitle += $update.Title + "`r`n"  # Append each title followed by a new line
+        }
+
+        # Output the full list of update titles
+        [Nxt]::WriteOutputString('TitlePendingUpdate', [string]$updateTitle)
+    }
+
+    Write-StatusMessage -Message 'WindowsUpdate Checked successfully'
+}
+
+function Get-DeepCleanUpSize {
+    $Path = $PATHS
+    $totaldeepSize = 0
+    $Directories = ""
+
+    foreach ($name in $Path.Keys) {
+        if (-Not (Test-Path -Path $Path[$name])) {
+            Write-StatusMessage -Message 'Path does not exist: ' + $Path[$name]
+            continue
+        }
+
+        try {
+            # Attempt to access the directory without admin privileges
+            $files = Get-ChildItem -Path $Path[$name] -Recurse -File -ErrorAction Stop
+            $size = ($files | Measure-Object -Property Length -Sum).Sum / 1MB
+            $size = [math]::Round($size, 2)
+            $totaldeepSize += $size
+
+            # Append only if size calculation was successful
+            $Directories += $name + ': ' + $size + " MB`r`n" 
+        }
+        catch {
+            # Capture the access denied error and skip the directory
+            if ($_.Exception.Message -match "Access to the path") {
+                Write-StatusMessage -Message "Skipping protected directory: $name (Access denied)"
+            } else {
+                Write-StatusMessage -Message "Failed to get size for directory: $name. Error: $_.Exception.Message"
+            }
+        }
+    }
+
+    # Round the total size after calculating for all accessible directories
+    $totaldeepSize = [math]::Round($totaldeepSize, 2)
+    $totaldeepSizeString = "$totaldeepSize MB"
+
+    # Output the results
+    if ($Directories -ne "") {
+        [Nxt]::WriteOutputString('IndivisualDirectoriesSize', $Directories)
+    }
+
+    [Nxt]::WriteOutputString('TotalDirectoriesSize', $totaldeepSizeString)
+    Write-StatusMessage -Message 'DeepCleanUpSize successfully displayed'
+}
+
+
+function Get-UniqueAppPackages {
+    $baseDirectory = "$env:temp"
+    $csvFileName = "UniqueAppPackages.csv"
+    $appPackageFilePath = Join-Path -Path $baseDirectory -ChildPath $csvFileName
+
+    # Ensure the base directory exists
+    if (-not (Test-Path $baseDirectory)) {
+        New-Item -Path $baseDirectory -ItemType Directory -Force
+    }
+
+    try {
+        # Retrieve the app packages
+        $appPackages = Get-AppxPackage
+
+        # Create the app list
+        $appList = $appPackages | ForEach-Object {
+            $installationType = if ($_.PackageFamilyName -like "Microsoft.*") { "System" } else { "User" }
+
+            [PSCustomObject]@{
+                Name              = $_.Name
+                InstallationType  = $installationType
+            }
+        }
+
+        # Group by unique app names
+        $uniqueApps = $appList | Group-Object -Property Name | ForEach-Object {
+            [PSCustomObject]@{
+                Name              = $_.Name
+                InstallationType  = $_.Group | Select-Object -First 1 -ExpandProperty InstallationType
+            }
+        }
+
+        # Export the unique app list to CSV
+        $uniqueApps | Export-Csv -Path $appPackageFilePath -NoTypeInformation
+        $Apps = $uniqueApps.Count
+        [Nxt]::WriteOutputString('TotalNumberOfUniqueApplications', $Apps)
+        Write-StatusMessage -Message 'TotalNumberOfUniqueApplications Count Exported Successfully'
+
+    } catch {
+        Write-StatusMessage -Message "Failed to export CSV: $_"
+    }
+
+    # If the CSV file was successfully created, import and display some data
+    if (Test-Path $appPackageFilePath) {
+        $AppPackageList = ""
+        $csvContent = Import-Csv -Path $appPackageFilePath
+        # Filter for 5 User installed apps and 5 System installed apps
+    $userApps = $csvContent | Where-Object { $_.InstallationType -eq 'User' } | Select-Object -First 5
+    $systemApps = $csvContent | Where-Object { $_.InstallationType -eq 'System' } | Select-Object -First 5
+
+    # Combine the results
+    $selectedApps = $userApps + $systemApps
+
+    # Output the app names and installation types
+    foreach ($line in $selectedApps) {
+        $appName = $line.Name
+        $installationType = $line.InstallationType
+
+        $AppPackageList += $appName + '|' + $installationType + "`r`n"
+        [Nxt]::WriteOutputString('UniqueAppPackagesList', [string]$AppPackageList) 
+        }
+        Write-StatusMessage -Message 'UniqueAppPackages Successfully Exported'
+    } else {
+        Write-StatusMessage -Message "CSV file not found"
+    }
+
+}
+
+function Get-LargeFiles {
+    param (
+        [array]$Path = @("$env:USERPROFILE"),
+        [int]$ThresholdMB = 10
+    )
+
+    $baseDirectory = "$env:temp"
+    $csvFileName = "LargeFiles.csv"
+    $largeFilePath = Join-Path -Path $baseDirectory -ChildPath $csvFileName
+
+    # Ensure the base directory exists
+    if (-not (Test-Path $baseDirectory)) {
+        New-Item -Path $baseDirectory -ItemType Directory -Force
+    }
+
+    # Initialize the array for files
+    $files = @()
+
+    # Check and validate each root path
+    foreach ($rootPath in $Path) {
+        
+        # Retrieve large files recursively
+        $files += Get-ChildItem -Path $rootPath -Recurse -File -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Length -gt ($ThresholdMB * 1MB) }
+
+        Write-StatusMessage -Message "Searching in path: $rootPath"
+    }
+
+    if ($files.Count -eq 0) {
+        Write-StatusMessage -Message "No large files found. Check paths and threshold."
+    } else {
+        $count = $files.Count
+        Write-StatusMessage -Message "Found $count large files."
+        [Nxt]::WriteOutputString('FoundLargeFiles', $count)
+    }
+
+    $totalLargeFileSize = [math]::Round(($files | Measure-Object -Property Length -Sum).Sum / 1MB, 2)
+    $LargeFileSize = "$totalLargeFileSize MB"
+
+    try {
+        $files | Select-Object Name, 
+                              @{Name="ModifiedDate"; Expression = {$_.LastWriteTime.ToString("yyyy-MM-dd")}}, 
+                              @{Name="SizeMB"; Expression = {[math]::Round($_.Length / 1MB, 2)}}, 
+                              FullName | Export-Csv -Path $largeFilePath -NoTypeInformation
+
+        [Nxt]::WriteOutputString('TotalLargeFileSize', $LargeFileSize)
+    } catch {
+        Write-StatusMessage -Message "Failed to export CSV: $_"
+    }
+
+    if (Test-Path $largeFilePath) {
+        $LargeFileList = ""
+        $csvContent = Import-Csv -Path $largeFilePath | Select-Object -First 15
+        Write-StatusMessage -Message "CSV file imported"
+        foreach ($line in $csvContent) {
+            $fileName = $line.Name
+            $modifiedDate = $line.ModifiedDate
+            $sizeMB = $line.SizeMB
+            
+            $LargeFileList += $fileName + '|' + $modifiedDate + '|' + $sizeMB + "`r`n"
+            [Nxt]::WriteOutputString('LargeFileList', [string]$LargeFileList)
+        }
+        Write-StatusMessage -Message 'LargeFiles Successfully Exported'
+        <# Delete the CSV file after all operations
+        Remove-Item -Path $largeFilePath -Force
+        Write-StatusMessage -Message "CSV file deleted"#>
+    } else {
+        Write-Host "CSV file not found"
+    }
+}
+
+#end
+[environment]::Exit((Invoke-Main))
