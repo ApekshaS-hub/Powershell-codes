@@ -1,0 +1,204 @@
+<#
+.SYNOPSIS
+Gets the system temperature & critical trip point.
+
+.DESCRIPTION
+Gets the system temperature & critical trip point.
+
+.INPUT
+
+.OUTPUTS                 
+1   CurrentTemperature	    Current system Temperature in degree celcius.
+2   CriticalTripPoint		A critical trip point refers to a specific temperature threshold at which the operating system performs an 	immediate and orderly shutdown of the device or the entire system to prevent damage due to overheating. This is a safety mechanism to protect hardware components from thermal damage.
+
+.FUNCTIONALITY
+GetInfo
+
+.NOTES
+Provider: 			Anurag Kumar Singh
+Context:            LocalSystem
+Version:            1.0 - Initial release
+Last Generated:     27-August-2024
+#>
+#
+# Input parameters definition
+#
+
+# End of parameters definition
+
+#
+# Constants definition
+#
+New-Variable -Name 'LOCAL_SYSTEM_IDENTITY' `
+    -Value 'S-1-5-18' -Option ReadOnly -Scope Script
+		
+New-Variable -Name 'REMOTE_ACTION_DLL_PATH' `
+    -Value "$env:NEXTHINK\RemoteActions\nxtremoteactions.dll" `
+    -Option ReadOnly -Scope Script
+	
+	
+$WINDOWS_VERSIONS = @{Windows7 = '6.1'
+    Windows8 = '6.2'
+    Windows81 = '6.3'
+    Windows10 = '10.0'
+    Windows11 = '10.0'
+}
+Set-Variable -Name 'WINDOWS_VERSIONS' -Option ReadOnly -Scope Script -Force
+
+$env:Path = 'C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\'
+#
+# Invoke Main
+#
+function Invoke-Main {
+    $exitCode = 0
+
+    try {
+		Add-NexthinkDLL
+        Test-RunningAsLocalSystem
+        Test-MinimumSupportedOSVersion -WindowsVersion 'Windows10'
+		
+    } catch {
+        Write-StatusMessage -Message $_
+        $exitCode = 1
+    }
+
+    return $exitCode
+}
+
+#
+# Template functions
+#
+
+function Add-NexthinkDLL {
+    if (-not (Test-Path -Path $REMOTE_ACTION_DLL_PATH)) { throw 'Nexthink DLL nxtremoteactions.dll not found. ' }
+
+    Add-Type -Path $REMOTE_ACTION_DLL_PATH
+}
+
+function Test-RunningAsLocalSystem {
+    $currentIdentity = Get-CurrentIdentity
+    if ($currentIdentity -ne $LOCAL_SYSTEM_IDENTITY) {
+        throw 'This script must be run as Local System. '
+    }
+}
+
+function Get-CurrentIdentity {
+    return [security.principal.windowsidentity]::GetCurrent().User.ToString()
+}
+
+function Test-MinimumSupportedOSVersion ([string]$WindowsVersion, [switch]$SupportedWindowsServer) {
+    $currentOSInfo = Get-OSVersionType
+    $OSVersion = $currentOSInfo.Version -as [version]
+
+    $supportedWindows = $WINDOWS_VERSIONS.$WindowsVersion -as [version]
+
+    if (-not ($currentOSInfo)) {
+        throw "$($ERROR_EXCEPTION_TYPE.Environment) This script could not return OS version. "
+    }
+
+    if ( $SupportedWindowsServer -eq $false -and $currentOSInfo.ProductType -ne 1) {
+        throw "$($ERROR_EXCEPTION_TYPE.Environment) This script is not compatible with Windows Servers. "
+    }
+
+    if ( $OSVersion -lt $supportedWindows) {
+        throw "$($ERROR_EXCEPTION_TYPE.Environment) This script is compatible with $WindowsVersion and later only. "
+    }
+}
+
+function Get-OSVersionType {
+
+    return Get-WindowsManagementData -Class Win32_OperatingSystem | Select-Object -Property Version,ProductType
+}
+
+function Get-WindowsManagementData ([string]$Class, [string]$Namespace = 'root/cimv2') {
+    try {
+        $query = [wmisearcher] "Select * from $Class"
+        $query.Scope.Path = "$Namespace"
+        $query.Get()
+    } catch {
+        throw "$($ERROR_EXCEPTION_TYPE.Environment) Error getting CIM/WMI information. Verify WinMgmt service status and WMI repository consistency. "
+    }
+}
+
+function Confirm-StringIsNotEmpty ([string]$Value) {
+    return -not [string]::IsNullOrEmpty((Format-StringValue -Value $Value))
+}
+
+function Format-StringValue ([string]$Value) {
+    return $Value.Replace('"', '').Replace("'", '').Trim()
+}
+
+function Write-StatusMessage ([psobject]$Message) {
+    $exception = $Message.ToString()
+
+    if ($Message.InvocationInfo.ScriptLineNumber) {
+        $version = Get-ScriptVersion
+        if(-not [string]::IsNullOrEmpty($version)) {
+            $version = "Version: $version. "
+        }
+
+        $errorMessage = $version + "Line '$($Message.InvocationInfo.ScriptLineNumber)'. "
+    }
+
+    $host.ui.WriteErrorLine($errorMessage + $exception)
+}
+
+function Get-ScriptVersion {
+    $scriptContent = Get-Content $MyInvocation.ScriptName | Out-String
+    if ($scriptContent -notmatch '<#[\r\n]{2}.SYNOPSIS[^\#\>]*(.NOTES[^\#\>]*)\#>') { return }
+
+    $helpBlock = $Matches[1].Split([environment]::NewLine)
+
+    foreach ($line in $helpBlock) {
+        if ($line -match 'Version:') {
+            return $line.Split(':')[1].Split('-')[0].Trim()
+        }
+    }
+}
+
+function Invoke-Campaign ([string]$CampaignId) {
+    $response = Get-CampaignResponse -CampaignId $CampaignId
+    $status = Get-CampaignResponseStatus -Response $response
+	$CampOptionOne
+    switch ($status) {
+        'fully' {
+            if ((Get-CampaignResponseAnswer -Response $response -QuestionName $CampaignQuestion) -eq $CampaignAnswer) {
+                
+            }
+			elseif ((Get-CampaignResponseAnswer -Response $response -QuestionName $CampaignQuestion) -eq $CampaignAnswer) {
+				
+			}
+			elseif ((Get-CampaignResponseAnswer -Response $response -QuestionName $CampaignQuestion) -eq $CampaignAnswer) {
+			
+			}
+			else{
+				
+			}
+        }
+        'timeout' { throw 'Timeout on getting an answer from the user. Outlook AutoComplete cache was not cleared. ' }
+        'postponed' { throw 'The user postponed the campaign. Outlook AutoComplete cache was not cleared. ' }
+        'declined' { throw 'The user declined the campaign. Outlook AutoComplete cache was not cleared. ' }
+        'connectionfailed' { throw 'Unable to connect to the Collector component that controls campaign notifications. ' }
+        'notificationfailed' { throw 'Unable to notify the Collector component that controls campaign notifications. ' }
+        default { throw "Failed to handle campaign response: $response. " }
+    }
+}
+
+function Get-CampaignResponse ([string]$CampaignId) {
+    return [Nxt.CampaignAction]::RunCampaign($CampaignId,900)
+}
+
+function Get-CampaignResponseStatus ($Response) {
+    return [Nxt.CampaignAction]::GetResponseStatus($Response)
+}
+
+function Get-CampaignResponseAnswer ($Response, [string]$QuestionName) {
+    return [Nxt.CampaignAction]::GetResponseAnswer($Response, $QuestionName)[0]
+}
+
+
+
+#
+# Main script flow
+#
+[environment]::Exit((Invoke-Main))
