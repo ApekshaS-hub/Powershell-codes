@@ -1,0 +1,291 @@
+<#
+.SYNOPSIS
+Script to manage downloaded files, identify large files, and detect duplicate files across specified directories.
+
+
+.DESCRIPTION
+This script provides a set of functionalities to analyze file systems for specific patterns: 
+1. `Get-DownloadedFiles`: Retrieves downloaded files from the specified directory and exports details to a CSV file.
+2. `Get-LargeFiles`: Searches for files exceeding a specified size threshold in the provided directories and exports the list to a CSV file.
+3. `Get-DuplicateFiles`: Identifies and exports duplicate files based on hash values within the specified directories.
+
+
+.INPUTS
+- $DirectoryForDownloadedFiles: String[] - Array of paths to directories where downloaded files will be searched.
+- $DirectoryforDuplicateFiles: String[] - Array of paths to directories where duplicate files will be searched.
+- $DirectoryforLargeFiles: String[] - Array of paths to directories where large files will be searched.
+- $ThresholdMB: Int - The file size threshold (in MB) for identifying large files.
+
+
+.FUNCTIONALITY
+GetInfo - This function is invoked to execute all three tasks: retrieving downloaded files, identifying large files, and detecting duplicate files.
+
+.NOTES
+Provider:            Apeksha Shinde
+Context:             Local System
+Version:             1.0 - Initial release 
+Last Generated:      
+#>
+
+
+#
+#INPUT
+#
+
+param(
+
+    [Parameter(Mandatory = $true)][string[]]$DirectoryForDownloadedFiles,
+    [Parameter(Mandatory = $true)][string[]]$DirectoryforDuplicateFiles,
+    [Parameter(Mandatory = $true)][string[]]$DirectoryforLargeFiles,
+    [Parameter(Mandatory = $true)][int]$ThresholdMB
+    
+)
+
+#
+# Constants definition
+#
+
+$env:Path = 'C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\'
+
+New-Variable -Name 'ERROR_EXCEPTION_TYPE' `
+    -Value @{Environment = '[Environment error]'
+             Input = '[Input error]'
+             Internal = '[Internal error]'} 
+			 
+New-Variable -Name 'LOCAL_SYSTEM_IDENTITY' `
+    -Value 'S-1-5-18' -Option ReadOnly -Scope Script
+	
+New-Variable -Name 'REMOTE_ACTION_DLL_PATH' `
+    -Value "$env:NEXTHINK\RemoteActions\nxtremoteactions.dll" `
+    -Option ReadOnly -Scope Script
+	
+
+#
+# Invoke Main
+#
+
+function Invoke-Main {
+    $exitCode = 0
+    
+    try {
+        Add-NexthinkRemoteActionDLL
+        #Test-RunningAsLocalSystem
+        Get-DownloadedFiles
+        Start-Sleep -Seconds 5
+        Get-LargeFiles
+        Start-Sleep -Seconds 5
+        Get-DuplicateFiles
+		
+				       
+    } catch {
+        Write-StatusMessage -Message $_
+        $exitCode = 1
+    }
+
+    return $exitCode
+}
+
+
+function Add-NexthinkRemoteActionDLL {
+    if (-not (Test-Path -Path $REMOTE_ACTION_DLL_PATH)) {
+		throw "$($ERROR_EXCEPTION_TYPE.Environment) Nexthink Remote Action DLL not found."
+}
+    Add-Type -Path $REMOTE_ACTION_DLL_PATH
+}
+
+function Test-RunningAsLocalSystem {
+    $currentIdentity = Get-CurrentIdentity
+    if ($currentIdentity -ne $LOCAL_SYSTEM_IDENTITY) {
+        throw "$($ERROR_EXCEPTION_TYPE.Environment) This script must be run as Local system mode. "
+    }
+}
+
+function Get-CurrentIdentity {
+    return [security.principal.windowsidentity]::GetCurrent().User.ToString()
+}
+
+function Write-StatusMessage ([psobject]$Message) {
+    $exception = $Message.ToString()
+
+    if ($Message.InvocationInfo.ScriptLineNumber) {
+        $version = Get-ScriptVersion
+        if(-not [string]::IsNullOrEmpty($version)) {
+            $version = "Version: $version. "
+        }
+
+        $errorMessage = $version + "Line '$($Message.InvocationInfo.ScriptLineNumber)'. "
+    }
+
+    $host.ui.WriteErrorLine($errorMessage + $exception)
+}
+
+function Get-ScriptVersion {
+    $scriptContent = Get-Content $MyInvocation.ScriptName | Out-String
+    if ($scriptContent -notmatch '<#[\r\n]{2}.SYNOPSIS[^\#\>]*(.NOTES[^\#\>]*)\#>') { return }
+
+    $helpBlock = $Matches[1].Split([environment]::NewLine)
+
+    foreach ($line in $helpBlock) {
+        if ($line -match 'Version:') {
+            return $line.Split(':')[1].Split('-')[0].Trim()
+        }
+    }
+}
+
+
+#PC Manager Features
+
+function Get-DownloadedFiles {
+    
+    if (-not (Test-Path $DirectoryForDownloadedFiles)) {
+        Write-StatusMessage -Message "No DownloadedFiles path found."
+        return
+    }
+
+    $downloadedFiles = Get-ChildItem -Path $DirectoryForDownloadedFiles -File | 
+                       Select-Object Name, LastWriteTime, @{Name='SizeMB'; Expression={[math]::Round($_.Length / 1MB, 2)}}, Length
+
+    if ($downloadedFiles.Count -eq 0) {
+       Write-StatusMessage -Message "No downloaded files found."
+       return
+    }
+
+    $csvPath = "$env:LOCALAPPDATA\Temp\DownloadedFiles.csv"
+    $downloadedFiles | Export-Csv -Path $csvPath -NoTypeInformation -Force
+    Write-StatusMessage -Message "Downloaded file list exported to: $csvPath"
+
+    $top5List = ""
+    $top5Files = $downloadedFiles | Select-Object -First 5
+    foreach ($file in $top5Files) {
+        $sizeMB = [math]::Round($file.Length / 1MB, 2)
+        $top5List += "$($file.Name), $($file.LastWriteTime), $sizeMB MB`r`n"
+        [Nxt]::WriteOutputString('TopFiveDownloadedFiles', $top5List)
+    }
+
+    #[Nxt]::WriteOutputString('TopFiveDownloadedFiles', $top5List)
+   
+    $totalSizeMB = [math]::Round(($downloadedFiles | Measure-Object -Property Length -Sum).Sum / 1MB, 2)
+    $totalSize = "$totalSizeMB MB"
+    [Nxt]::WriteOutputString('TotalDownloadedFileSize', $totalSize)
+}
+
+
+function Get-LargeFiles { 
+    $baseDirectory = "$env:temp"
+    $csvFileName = "LargeFiles.csv"
+    $largeFilePath = Join-Path -Path $baseDirectory -ChildPath $csvFileName
+
+    if (-not (Test-Path $baseDirectory)) {
+        New-Item -Path $baseDirectory -ItemType Directory -Force
+    }
+
+    $files = @()
+
+    foreach ($rootPath in $DirectoryforLargeFiles) {
+        
+        # Retrieve large files recursively
+        $files += Get-ChildItem -Path $rootPath -Recurse -File -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Length -gt ($ThresholdMB * 1MB) }
+
+        #Write-StatusMessage -Message "Large Files are searching in path: $rootPath"
+    }
+
+    if ($files.Count -eq 0) {
+        Write-StatusMessage -Message "No large files found. Check paths and threshold."
+    } else {
+        $count = $files.Count
+        #Write-StatusMessage -Message "Found $count large files."
+    }
+
+    $totalLargeFileSize = [math]::Round(($files | Measure-Object -Property Length -Sum).Sum / 1MB, 2)
+    $LargeFileSize = "$totalLargeFileSize MB"
+
+    try {
+        $files | Select-Object Name, 
+                              @{Name="ModifiedDate"; Expression = {$_.LastWriteTime.ToString("yyyy-MM-dd")}}, 
+                              @{Name="SizeMB"; Expression = {[math]::Round($_.Length / 1MB, 2)}}, 
+                              FullName | Export-Csv -Path $largeFilePath -NoTypeInformation
+
+        [Nxt]::WriteOutputString('TotalLargeFileSize', $LargeFileSize)
+        Write-StatusMessage -Message "LargeFile list exported successfully to: $largeFilePath"
+    } catch {
+        Write-StatusMessage -Message "Failed to export CSV: $_"
+    }
+
+    if (Test-Path $largeFilePath) {
+        $LargeFileList = ""
+        $csvContent = Import-Csv -Path $largeFilePath | Select-Object -First 5
+        foreach ($line in $csvContent) {
+            $fileName = $line.Name
+            $modifiedDate = $line.ModifiedDate
+            $sizeMB = $line.SizeMB
+            $LargeFileList += $fileName + '|' + $modifiedDate + '|' + $sizeMB + "`r`n"
+            [Nxt]::WriteOutputString('TopFiveLargeFiles', $LargeFileList)
+        }
+        #[Nxt]::WriteOutputString('TopFiveLargeFiles', $LargeFileList)
+
+    } else {
+        Write-StatusMessage -Message "CSV file not found"
+    }
+}
+
+
+function Get-DuplicateFiles {
+    if (-not (Test-Path $DirectoryforDuplicateFiles)) {
+        Write-StatusMessage -Message "No DuplicateFiles path found."
+        return
+    }
+
+    $fileList = Get-ChildItem -Path $DirectoryforDuplicateFiles -File -Recurse |
+                ForEach-Object {
+                    [PSCustomObject]@{
+                        FullName       = $_.FullName
+                        Name           = $_.Name
+                        LastWriteTime  = $_.LastWriteTime
+                        SizeMB         = [math]::Round($_.Length / 1MB, 2)
+                        Hash           = (Get-FileHash $_.FullName -Algorithm MD5).Hash
+                    }
+                }
+
+    # Group by Hash and select groups with more than 1 file (duplicates)
+    $duplicates = $fileList | Group-Object -Property Hash | Where-Object { $_.Count -gt 1 }
+
+    if ($duplicates.Count -eq 0) {
+        Write-StatusMessage -Message "No duplicates found."
+        return
+    }
+
+    $totalDuplicateSize = 0
+    $duplicateList = @()
+    $top6List = ""
+
+    $allDuplicates = $duplicates | ForEach-Object { $_.Group | Select-Object -Skip 1 }
+
+    $topDuplicates = $allDuplicates | Select-Object -First 6
+    foreach ($file in $topDuplicates) {
+        $sizeMB = [math]::Round($file.SizeMB, 2)
+        $top6List += "$($file.Name), $($file.LastWriteTime), $sizeMB MB`r`n"
+        [Nxt]::WriteOutputString('TopSixDuplicateFiles', $top6List)
+    }
+    #[Nxt]::WriteOutputString('TopSixDuplicateFiles', $top6List)
+    
+    # Process all duplicates for exporting to CSV
+    foreach ($d in $duplicates) {
+        $duplicateList += $d.Group
+        $totalDuplicateSize += ($d.Group | Select-Object -Skip 1 | Measure-Object -Property SizeMB -Sum).Sum
+    }
+
+    $csvPath = "$env:LOCALAPPDATA\Temp\DuplicateFiles.csv"
+    if ($duplicateList.Count -gt 0) {
+        $duplicateList | Export-Csv -Path $csvPath -NoTypeInformation -Force
+        Write-StatusMessage -Message "Duplicate file list exported to: $csvPath"
+    } else {
+        Write-StatusMessage -Message "No duplicates to export."
+    }
+    $totalSizeMB = [math]::Round($totalDuplicateSize, 2)
+    $totalSize = "$totalSizeMB MB"
+    [Nxt]::WriteOutputString('TotalDuplicateFileSize',$totalSize)
+}
+
+#end
+[environment]::Exit((Invoke-Main))
